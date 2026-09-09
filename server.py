@@ -558,8 +558,10 @@ class Handler(BaseHTTPRequestHandler):
             table = query.get("table", ["ATTLOG"])[0].upper()
             sn = query.get("SN", [""])[0]
             log(f"ZKTeco cdata POST (SN={sn}, table={table})")
+            if body_text.strip():
+                log(f"ZKTeco body preview: {body_text[:200]}")
 
-            if table == "ATTLOG" or not table:
+            if table in ("ATTLOG", "RTLOG") or not table:
                 result = process_zkteco_body(body_text)
                 log(f"ZKTeco processed: {result}")
                 self.send_text(200, "OK")
