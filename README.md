@@ -38,8 +38,8 @@ Real-time biometric attendance connector bridging **ZKTeco Biometric Devices** /
 1. On the physical ZKTeco device screen, press **M/OK** to enter the Menu.
 2. Navigate to **Comm.** (Communication) -> **Cloud Server Setting** (or **ADMS** / **Web Server**).
 3. Configure:
-   - **Server Address**: `<your-render-app-name>.onrender.com` (without `https://`)
-   - **Server Port**: `443` (for HTTPS) or `80`
+   - **Server Address**: `attendance-easytime-1.onrender.com` (without `https://`)
+   - **Server Port**: `443` (for HTTPS)
    - **Enable Domain Name**: `ON` (Yes)
    - **Enable Proxy Server**: `OFF`
 4. Save and restart the device if prompted.
@@ -52,7 +52,7 @@ Real-time biometric attendance connector bridging **ZKTeco Biometric Devices** /
 1. In **EasyTimePro** Web Panel -> **System Settings** -> **Integration / API Settings**.
 2. Set the Webhook/Push URL to your live Render URL:
    ```text
-   https://<your-render-app-name>.onrender.com/
+   https://attendance-easytime-1.onrender.com/
    ```
 3. Save settings.
 
