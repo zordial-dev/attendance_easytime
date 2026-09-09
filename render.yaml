@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: attendance-easytime
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    plan: free
+    envVars:
+      - key: ZOHO_CLIENT_ID
+        sync: false
+      - key: ZOHO_CLIENT_SECRET
+        sync: false
+      - key: ZOHO_REFRESH_TOKEN
+        sync: false
+      - key: SYNC_FROM_DATE
+        value: today
+      - key: ZOHO_DOMAIN
+        value: in

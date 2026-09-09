@@ -4,8 +4,9 @@ import os
 import sys
 import time
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
+from urllib.parse import parse_qs, urlparse
 
 import requests
 from dotenv import load_dotenv
@@ -50,11 +51,12 @@ ZOHO_CLIENT_ID = os.getenv("ZOHO_CLIENT_ID")
 ZOHO_CLIENT_SECRET = os.getenv("ZOHO_CLIENT_SECRET")
 ZOHO_REFRESH_TOKEN = os.getenv("ZOHO_REFRESH_TOKEN")
 
-ZOHO_ACCOUNTS_URL = "https://accounts.zoho.in"
-ZOHO_PEOPLE_URL = "https://people.zoho.in"
+ZOHO_DOMAIN = os.getenv("ZOHO_DOMAIN", "in").strip().lstrip(".")
+ZOHO_ACCOUNTS_URL = os.getenv("ZOHO_ACCOUNTS_URL", f"https://accounts.zoho.{ZOHO_DOMAIN}")
+ZOHO_PEOPLE_URL = os.getenv("ZOHO_PEOPLE_URL", f"https://people.zoho.{ZOHO_DOMAIN}")
 
 HOST = "0.0.0.0"
-PORT = 8000
+PORT = int(os.getenv("PORT", 8000))
 
 PROCESSED_FILE = "processed_punches.json"
 
@@ -110,8 +112,11 @@ def load_processed():
 
 def save_processed(processed):
 
-    with open(PROCESSED_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(processed), f, indent=2)
+    try:
+        with open(PROCESSED_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(processed), f, indent=2)
+    except Exception as e:
+        log(f"Warning: Could not save processed punches: {e}")
 
 
 processed_punches = load_processed()
@@ -204,9 +209,11 @@ def parse_punch_state(val):
     if val is None:
         return None
     s = str(val).strip().lower()
-    if s in ["check in", "checkin", "in", "0", "i", "duty on", "true"]:
+    # 0=checkin, 3=break-in, 4=overtime-in
+    if s in ["check in", "checkin", "in", "0", "i", "duty on", "true", "3", "4"]:
         return "checkin"
-    elif s in ["check out", "checkout", "out", "1", "o", "duty off", "false"]:
+    # 1=checkout, 2=break-out, 5=overtime-out
+    elif s in ["check out", "checkout", "out", "1", "o", "duty off", "false", "2", "5"]:
         return "checkout"
     return None
 
@@ -410,6 +417,63 @@ def process_body(body):
 
 
 # ============================================================
+# PROCESS ZKTECO DIRECT ADMS PUSH DATA
+# ============================================================
+
+def process_zkteco_body(body_text):
+    """
+    Parses raw ZKTeco ATTLOG push lines.
+    Format per line (tab-separated, occasionally comma/space):
+    <USER_PIN>\t<YYYY-MM-DD HH:MM:SS>\t<STATUS>\t<VERIFY_MODE>...
+    STATUS: 0=checkin, 1=checkout, 2=break-out, 3=break-in, 4=ot-in, 5=ot-out
+    """
+    lines = [line.strip() for line in body_text.strip().splitlines() if line.strip()]
+    records = []
+
+    for line in lines:
+        parts = line.split("\t")
+        if len(parts) < 2:
+            if "," in line:
+                parts = [p.strip() for p in line.split(",")]
+            else:
+                parts = line.split()
+
+        if len(parts) >= 2:
+            pin = parts[0].strip()
+            punch_time = parts[1].strip()
+            status = parts[2].strip() if len(parts) > 2 else "0"
+            verify = parts[3].strip() if len(parts) > 3 else ""
+
+            records.append({
+                "EMP_CODE": pin,
+                "PUNCH_DATETIME": punch_time,
+                "PUNCH_STATE": status,
+                "verify_type": verify
+            })
+
+    if not records:
+        log("No valid ZKTeco attendance lines found in body.")
+        return {"status": "error", "message": "No valid ATTLOG lines found", "count": 0}
+
+    log(f"ZKTeco direct push: found {len(records)} record(s)")
+    success = 0
+    failed = 0
+    for r in records:
+        if send_to_zoho(r):
+            success += 1
+        else:
+            failed += 1
+
+    log(f"ZKTeco batch completed: Success={success}, Failed={failed}")
+    return {
+        "status": "success",
+        "processed": success,
+        "failed": failed,
+        "count": len(records)
+    }
+
+
+# ============================================================
 # HTTP SERVER
 # ============================================================
 
@@ -427,30 +491,87 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(response)
 
+    def send_text(self, status, text):
+        response = text.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(response)))
+        self.end_headers()
+        self.wfile.write(response)
+
     def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
+        query = parse_qs(parsed.query)
+
+        # ZKTeco Push protocol: device options handshake
+        if path == "/iclock/cdata":
+            sn = query.get("SN", [""])[0]
+            log(f"ZKTeco handshake from SN: {sn or 'unknown'}")
+            options_reply = (
+                f"GET OPTION FROM: {sn}\r\n"
+                "Stamp=9999\r\n"
+                "OpStamp=9999\r\n"
+                "ErrorDelay=60\r\n"
+                "Delay=30\r\n"
+                "TransTimes=00:00;14:00\r\n"
+                "TransInterval=1\r\n"
+                "TransFlag=TransData AttLog\r\n"
+                "Realtime=1\r\n"
+                "Encrypt=0\r\n"
+            )
+            self.send_text(200, options_reply)
+            return
+
+        # ZKTeco Push protocol: command polling (no pending commands)
+        if path == "/iclock/getrequest":
+            self.send_text(200, "OK")
+            return
+
+        # Health Check (Render & monitoring)
         self.send_json(
             200,
             {
                 "status": "running",
-                "service": "EasyTimePro -> Zoho People",
+                "service": "EasyTimePro & ZKTeco -> Zoho People Connector",
+                "mode": "dual (EasyTimePro JSON Webhook + ZKTeco ADMS Direct)",
                 "sync_cutoff": SYNC_CUTOFF.strftime("%Y-%m-%d %H:%M:%S")
             }
         )
 
     def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
+        query = parse_qs(parsed.query)
+
         length = int(self.headers.get("Content-Length", 0))
-        if length == 0:
-            self.send_json(
-                400,
-                {
-                    "status": "error",
-                    "message": "Empty request body"
-                }
-            )
+        body_bytes = self.rfile.read(length) if length > 0 else b""
+        body_text = body_bytes.decode("utf-8", errors="replace")
+
+        # ZKTeco device command acknowledgment
+        if path == "/iclock/devicecmd":
+            self.send_text(200, "OK")
             return
 
-        body = self.rfile.read(length)
-        body_text = body.decode("utf-8", errors="replace")
+        # ZKTeco direct biometric push endpoint
+        if path == "/iclock/cdata":
+            table = query.get("table", ["ATTLOG"])[0].upper()
+            sn = query.get("SN", [""])[0]
+            log(f"ZKTeco cdata POST (SN={sn}, table={table})")
+
+            if table == "ATTLOG" or not table:
+                result = process_zkteco_body(body_text)
+                log(f"ZKTeco processed: {result}")
+                self.send_text(200, "OK")
+            else:
+                self.send_text(200, "OK")
+            return
+
+        # Standard Webhook (EasyTimePro JSON payload)
+        if not body_text.strip():
+            self.send_json(400, {"status": "error", "message": "Empty request body"})
+            return
+
         result = process_body(body_text)
         self.send_json(200, result)
 
@@ -459,17 +580,24 @@ class Handler(BaseHTTPRequestHandler):
 # START
 # ============================================================
 
-log("==========================================")
-log(" EasyTimePro -> Zoho People Connector")
-log(f" Server: http://{HOST}:{PORT}")
-log(f" Sync Cutoff: {SYNC_CUTOFF.strftime('%Y-%m-%d %H:%M:%S')} (punches before this are skipped)")
-log(f" Log file: {LOG_FILE}")
-log("==========================================")
-log("Waiting for EasyTimePro...")
+def run_server():
+    log("==========================================")
+    log(" EasyTimePro & ZKTeco -> Zoho People Connector")
+    log(f" Server: http://{HOST}:{PORT}")
+    log(f" Zoho DC: {ZOHO_PEOPLE_URL}")
+    log(f" Sync Cutoff: {SYNC_CUTOFF.strftime('%Y-%m-%d %H:%M:%S')} (punches before this are skipped)")
+    log(f" Log file: {LOG_FILE}")
+    log(" Mode: Dual (EasyTimePro Webhook + ZKTeco Direct ADMS)")
+    log("==========================================")
+    log("Waiting for attendance punches...")
 
-server = HTTPServer(
-    (HOST, PORT),
-    Handler
-)
+    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        log("Server stopped by user.")
+        server.server_close()
 
-server.serve_forever()
+
+if __name__ == "__main__":
+    run_server()

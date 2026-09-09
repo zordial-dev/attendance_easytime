@@ -1,11 +1,14 @@
-# EasyTimePro to Zoho People Attendance Middleware
+# EasyTimePro & ZKTeco to Zoho People Attendance Middleware
 
-Real-time biometric attendance connector bridging **EasyTimePro** and **Zoho People**.
+Real-time biometric attendance connector bridging **ZKTeco Biometric Devices** / **EasyTimePro** and **Zoho People**.
 
 ## 🚀 Features
-- **Real-Time Webhook Receiver**: Receives push attendance punches from EasyTimePro over HTTP/HTTPS.
-- **Biometric ID Mapping (`mapId`)**: Automatically syncs punches using biometric mapper IDs to Zoho People Employee Profiles.
+- **Dual-Mode Integration**:
+  - **Option 1 (Direct ZKTeco Biometric Machine)**: Connects directly to ZKTeco hardware via ADMS push protocol (`/iclock/cdata`). **No local laptop or PC required!**
+  - **Option 2 (EasyTimePro Webhook)**: Ingests webhook pushes from local EasyTimePro software.
+- **Biometric ID Mapping (`mapId`)**: Automatically syncs punches using biometric user IDs (`EMP_CODE`) to Zoho People Employee Profiles.
 - **Zoho OAuth Token Management**: Automatically generates, caches, and refreshes OAuth tokens with scope `ZOHOPEOPLE.attendance.ALL`.
+- **Threaded Concurrency**: Multi-threaded request handling prevents connection drops during heavy punch bursts.
 - **Duplicate Prevention**: In-memory and persistent record deduplication.
 - **Past Punch Filtering**: Configurable cutoff (`SYNC_FROM_DATE`) to sync only live/onward punches.
 - **Production-Ready Logging**: Rotating log file with automatic 5MB rotation.
@@ -25,11 +28,26 @@ Real-time biometric attendance connector bridging **EasyTimePro** and **Zoho Peo
    - `ZOHO_CLIENT_SECRET`: Your Zoho Client Secret
    - `ZOHO_REFRESH_TOKEN`: Your Zoho Refresh Token
    - `SYNC_FROM_DATE`: `today` (or specific timestamp)
+   - `ZOHO_DOMAIN`: `in` (or `com`, `eu`)
 5. Click **Deploy**.
 
 ---
 
-## ⚙️ EasyTimePro Configuration
+## ⚙️ Option 1: Direct ZKTeco Machine Setup (No Laptop Needed!)
+
+1. On the physical ZKTeco device screen, press **M/OK** to enter the Menu.
+2. Navigate to **Comm.** (Communication) -> **Cloud Server Setting** (or **ADMS** / **Web Server**).
+3. Configure:
+   - **Server Address**: `<your-render-app-name>.onrender.com` (without `https://`)
+   - **Server Port**: `443` (for HTTPS) or `80`
+   - **Enable Domain Name**: `ON` (Yes)
+   - **Enable Proxy Server**: `OFF`
+4. Save and restart the device if prompted.
+5. Once connected, punches will upload directly to your Render server and sync straight to Zoho People!
+
+---
+
+## ⚙️ Option 2: EasyTimePro Webhook Setup
 
 1. In **EasyTimePro** Web Panel -> **System Settings** -> **Integration / API Settings**.
 2. Set the Webhook/Push URL to your live Render URL:
@@ -37,3 +55,4 @@ Real-time biometric attendance connector bridging **EasyTimePro** and **Zoho Peo
    https://<your-render-app-name>.onrender.com/
    ```
 3. Save settings.
+
