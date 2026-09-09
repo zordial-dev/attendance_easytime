@@ -207,7 +207,7 @@ def parse_punch_datetime(val):
 
 def parse_punch_state(val):
     if val is None:
-        return None
+        return "auto"
     s = str(val).strip().lower()
     # 0=checkin, 3=break-in, 4=overtime-in
     if s in ["check in", "checkin", "in", "0", "i", "duty on", "true", "3", "4"]:
@@ -215,7 +215,32 @@ def parse_punch_state(val):
     # 1=checkout, 2=break-out, 5=overtime-out
     elif s in ["check out", "checkout", "out", "1", "o", "duty off", "false", "2", "5"]:
         return "checkout"
+    elif s in ["255", "-1", "auto", "unspecified", ""]:
+        return "auto"
     return None
+
+
+
+emp_daily_punches = {}
+
+
+def init_daily_punches():
+    for item in processed_punches:
+        try:
+            parts = item.split("|")
+            if len(parts) >= 2:
+                emp = parts[0]
+                dt_str = parts[1]
+                dt, _ = parse_punch_datetime(dt_str)
+                if dt:
+                    d_key = f"{emp}|{dt.strftime('%Y-%m-%d')}"
+                    if d_key not in emp_daily_punches or dt > emp_daily_punches[d_key]:
+                        emp_daily_punches[d_key] = dt
+        except Exception:
+            pass
+
+
+init_daily_punches()
 
 
 # ============================================================
@@ -256,6 +281,25 @@ def send_to_zoho(record):
     if not state_normalized:
         log(f"ERROR: Unknown PUNCH_STATE: {punch_state_raw}")
         return False
+
+    date_key = f"{emp_code}|{punch_dt.strftime('%Y-%m-%d')}"
+
+    # Handle AUTO (255 / undefined): first punch of the day is checkin, later is checkout
+    if state_normalized == "auto":
+        if date_key not in emp_daily_punches:
+            state_normalized = "checkin"
+            emp_daily_punches[date_key] = punch_dt
+        else:
+            last_dt = emp_daily_punches[date_key]
+            diff_sec = abs((punch_dt - last_dt).total_seconds())
+            if diff_sec < 60:
+                log(f"SKIPPED (Debounce): {emp_code} punched within {int(diff_sec)}s of previous punch")
+                return True
+            state_normalized = "checkout"
+            emp_daily_punches[date_key] = punch_dt
+    else:
+        emp_daily_punches[date_key] = punch_dt
+
 
     # --------------------------------------------------------
     # Duplicate key
