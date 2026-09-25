@@ -243,11 +243,23 @@ def init_daily_punches():
 init_daily_punches()
 
 
+# Recent punches ring buffer for UI feed
+recent_punches = []
+MAX_RECENT_PUNCHES = 50
+
+
+def add_recent_punch(item):
+    global recent_punches
+    recent_punches.insert(0, item)
+    if len(recent_punches) > MAX_RECENT_PUNCHES:
+        recent_punches = recent_punches[:MAX_RECENT_PUNCHES]
+
+
 # ============================================================
 # SEND ATTENDANCE
 # ============================================================
 
-def send_to_zoho(record):
+def send_to_zoho(record, is_bypass=False):
 
     emp_code = extract_field(
         record,
@@ -266,21 +278,34 @@ def send_to_zoho(record):
 
     if not emp_code:
         log("ERROR: EMP_CODE / User ID missing")
-        return False
+        return {
+            "success": False,
+            "status": "error",
+            "message": "EMP_CODE / User ID is missing"
+        }
 
     if not punch_datetime_raw:
-        log("ERROR: PUNCH_DATETIME missing")
-        return False
-
-    punch_dt, zoho_datetime = parse_punch_datetime(punch_datetime_raw)
-    if not punch_dt or not zoho_datetime:
-        log(f"ERROR: Invalid date format: {punch_datetime_raw}")
-        return False
+        # Default to current time if missing
+        punch_dt = datetime.now()
+        zoho_datetime = punch_dt.strftime("%d/%m/%Y %H:%M:%S")
+    else:
+        punch_dt, zoho_datetime = parse_punch_datetime(punch_datetime_raw)
+        if not punch_dt or not zoho_datetime:
+            log(f"ERROR: Invalid date format: {punch_datetime_raw}")
+            return {
+                "success": False,
+                "status": "error",
+                "message": f"Invalid date format: {punch_datetime_raw}"
+            }
 
     state_normalized = parse_punch_state(punch_state_raw)
     if not state_normalized:
         log(f"ERROR: Unknown PUNCH_STATE: {punch_state_raw}")
-        return False
+        return {
+            "success": False,
+            "status": "error",
+            "message": f"Unknown punch state: {punch_state_raw}"
+        }
 
     date_key = f"{emp_code}|{punch_dt.strftime('%Y-%m-%d')}"
 
@@ -292,14 +317,20 @@ def send_to_zoho(record):
         else:
             last_dt = emp_daily_punches[date_key]
             diff_sec = abs((punch_dt - last_dt).total_seconds())
-            if diff_sec < 60:
+            if diff_sec < 60 and not is_bypass:
                 log(f"SKIPPED (Debounce): {emp_code} punched within {int(diff_sec)}s of previous punch")
-                return True
+                return {
+                    "success": True,
+                    "status": "debounced",
+                    "message": f"Debounced: punched within {int(diff_sec)}s of previous punch",
+                    "emp_code": emp_code,
+                    "datetime": zoho_datetime,
+                    "punch_state": state_normalized
+                }
             state_normalized = "checkout"
             emp_daily_punches[date_key] = punch_dt
     else:
         emp_daily_punches[date_key] = punch_dt
-
 
     # --------------------------------------------------------
     # Duplicate key
@@ -311,19 +342,33 @@ def send_to_zoho(record):
         f"{state_normalized}"
     )
 
-    if unique_key in processed_punches:
+    if unique_key in processed_punches and not is_bypass:
         log("DUPLICATE: Already processed")
-        return True
+        return {
+            "success": True,
+            "status": "duplicate",
+            "message": "Duplicate punch: already recorded in Zoho",
+            "emp_code": emp_code,
+            "datetime": zoho_datetime,
+            "punch_state": state_normalized
+        }
 
     # --------------------------------------------------------
     # Past punch cutoff check (only sync from today / onwards)
     # --------------------------------------------------------
 
-    if punch_dt < SYNC_CUTOFF:
+    if punch_dt < SYNC_CUTOFF and not is_bypass:
         log(f"SKIPPED (Past punch): {zoho_datetime} is before sync start ({SYNC_CUTOFF.strftime('%d/%m/%Y %H:%M:%S')})")
         processed_punches.add(unique_key)
         save_processed(processed_punches)
-        return True
+        return {
+            "success": True,
+            "status": "past_punch_skipped",
+            "message": f"Skipped historical punch before {SYNC_CUTOFF.strftime('%d/%m/%Y %H:%M:%S')}",
+            "emp_code": emp_code,
+            "datetime": zoho_datetime,
+            "punch_state": state_normalized
+        }
 
     # --------------------------------------------------------
     # OAuth
@@ -333,7 +378,11 @@ def send_to_zoho(record):
         access_token = get_access_token()
     except Exception as e:
         log(f"OAuth ERROR: {e}")
-        return False
+        return {
+            "success": False,
+            "status": "oauth_error",
+            "message": f"OAuth Error: {e}"
+        }
 
     # --------------------------------------------------------
     # Prepare attendance request
@@ -370,22 +419,57 @@ def send_to_zoho(record):
         )
     except Exception as e:
         log(f"Zoho connection ERROR: {e}")
-        return False
+        return {
+            "success": False,
+            "status": "connection_error",
+            "message": f"Zoho connection error: {e}"
+        }
 
     log(f"ZOHO RESPONSE [{response.status_code}]: {response.text}")
 
     # --------------------------------------------------------
-    # Success
+    # Result evaluation
     # --------------------------------------------------------
+
+    punch_entry = {
+        "emp_code": emp_code,
+        "datetime": zoho_datetime,
+        "punch_state": state_normalized,
+        "source": "Bypass Web" if is_bypass else "Machine/Webhook",
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "status_code": response.status_code
+    }
 
     if response.status_code in (200, 201):
         log(f"Attendance recorded for mapId: {emp_code}")
         processed_punches.add(unique_key)
         save_processed(processed_punches)
-        return True
+        punch_entry["success"] = True
+        punch_entry["zoho_response"] = response.text[:200]
+        add_recent_punch(punch_entry)
+        return {
+            "success": True,
+            "status": "success",
+            "message": f"Attendance ({state_normalized.upper()}) recorded for {emp_code}",
+            "emp_code": emp_code,
+            "datetime": zoho_datetime,
+            "punch_state": state_normalized,
+            "zoho_response": response.text
+        }
 
+    punch_entry["success"] = False
+    punch_entry["zoho_response"] = response.text[:200]
+    add_recent_punch(punch_entry)
     log("Attendance request FAILED.")
-    return False
+    return {
+        "success": False,
+        "status": "zoho_error",
+        "message": f"Zoho rejected punch with status {response.status_code}",
+        "emp_code": emp_code,
+        "datetime": zoho_datetime,
+        "punch_state": state_normalized,
+        "zoho_response": response.text
+    }
 
 
 # ============================================================
@@ -423,7 +507,7 @@ def process_body(body):
                 records = data[key]
                 break
 
-        if not records and "EMP_CODE" in data:
+        if not records and ("EMP_CODE" in data or "emp_code" in data):
             records = [data]
 
     if not records:
@@ -445,7 +529,9 @@ def process_body(body):
             continue
 
         result = send_to_zoho(record)
-        if result:
+        if isinstance(result, dict) and result.get("success"):
+            success += 1
+        elif result is True:
             success += 1
         else:
             failed += 1
@@ -503,7 +589,8 @@ def process_zkteco_body(body_text):
     success = 0
     failed = 0
     for r in records:
-        if send_to_zoho(r):
+        res = send_to_zoho(r)
+        if (isinstance(res, dict) and res.get("success")) or res is True:
             success += 1
         else:
             failed += 1
@@ -527,11 +614,17 @@ class Handler(BaseHTTPRequestHandler):
         # Suppress default stdout log to avoid duplicates
         return
 
+    def send_cors_headers(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+
     def send_json(self, status, data):
         response = json.dumps(data).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(response)))
+        self.send_cors_headers()
         self.end_headers()
         self.wfile.write(response)
 
@@ -540,8 +633,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", str(len(response)))
+        self.send_cors_headers()
         self.end_headers()
         self.wfile.write(response)
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_cors_headers()
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -572,14 +672,31 @@ class Handler(BaseHTTPRequestHandler):
             self.send_text(200, "OK")
             return
 
+        # API: Status & Live Feed for React Web Portal
+        if path in ("/api/status", "/api/history"):
+            self.send_json(
+                200,
+                {
+                    "status": "online",
+                    "service": "EasyTimePro & ZKTeco -> Zoho People Connector",
+                    "zoho_domain": ZOHO_DOMAIN,
+                    "zoho_people_url": ZOHO_PEOPLE_URL,
+                    "sync_cutoff": SYNC_CUTOFF.strftime("%Y-%m-%d %H:%M:%S"),
+                    "total_processed_records": len(processed_punches),
+                    "recent_punches": recent_punches
+                }
+            )
+            return
+
         # Health Check (Render & monitoring)
         self.send_json(
             200,
             {
                 "status": "running",
                 "service": "EasyTimePro & ZKTeco -> Zoho People Connector",
-                "mode": "dual (EasyTimePro JSON Webhook + ZKTeco ADMS Direct)",
-                "sync_cutoff": SYNC_CUTOFF.strftime("%Y-%m-%d %H:%M:%S")
+                "mode": "dual (EasyTimePro JSON Webhook + ZKTeco ADMS Direct) + Web Punch Portal",
+                "sync_cutoff": SYNC_CUTOFF.strftime("%Y-%m-%d %H:%M:%S"),
+                "total_processed_records": len(processed_punches)
             }
         )
 
@@ -613,6 +730,51 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_text(200, "OK")
             return
 
+        # Dedicated Web Bypass / Manual Check-in Endpoint
+        if path in ("/api/punch", "/api/bypass", "/bypass-checkin", "/manual-punch"):
+            if not body_text.strip():
+                self.send_json(400, {"status": "error", "message": "Empty request body"})
+                return
+
+            try:
+                payload = json.loads(body_text)
+            except json.JSONDecodeError:
+                self.send_json(400, {"status": "error", "message": "Invalid JSON payload"})
+                return
+
+            emp_code = (
+                payload.get("emp_code")
+                or payload.get("EMP_CODE")
+                or payload.get("employee_id")
+                or payload.get("userId")
+                or payload.get("user_id")
+            )
+            punch_state = payload.get("punch_state") or payload.get("PUNCH_STATE") or "auto"
+            punch_datetime = payload.get("punch_datetime") or payload.get("PUNCH_DATETIME")
+
+            if not emp_code:
+                self.send_json(400, {
+                    "status": "error",
+                    "message": "Employee ID (emp_code) is required"
+                })
+                return
+
+            if not punch_datetime:
+                punch_datetime = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+            record = {
+                "EMP_CODE": str(emp_code).strip(),
+                "PUNCH_DATETIME": punch_datetime,
+                "PUNCH_STATE": str(punch_state).strip().lower()
+            }
+
+            log(f"Web Bypass Punch received -> {record}")
+            res = send_to_zoho(record, is_bypass=True)
+
+            status_code = 200 if res.get("success") else 400
+            self.send_json(status_code, res)
+            return
+
         # Standard Webhook (EasyTimePro JSON payload)
         if not body_text.strip():
             self.send_json(400, {"status": "error", "message": "Empty request body"})
@@ -633,7 +795,7 @@ def run_server():
     log(f" Zoho DC: {ZOHO_PEOPLE_URL}")
     log(f" Sync Cutoff: {SYNC_CUTOFF.strftime('%Y-%m-%d %H:%M:%S')} (punches before this are skipped)")
     log(f" Log file: {LOG_FILE}")
-    log(" Mode: Dual (EasyTimePro Webhook + ZKTeco Direct ADMS)")
+    log(" Mode: Dual (EasyTimePro Webhook + ZKTeco Direct ADMS) + Web Punch API")
     log("==========================================")
     log("Waiting for attendance punches...")
 
@@ -646,4 +808,4 @@ def run_server():
 
 
 if __name__ == "__main__":
-    run_server()
+    run_server()

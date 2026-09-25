@@ -56,3 +56,29 @@ Real-time biometric attendance connector bridging **ZKTeco Biometric Devices** /
    ```
 3. Save settings.
 
+---
+
+## ⚙️ Option 3: Web Punch Portal (Manual & Bypass Check-In)
+
+A modern React-based attendance terminal web app is located in the external folder `../attendance_web/`. Employees can check-in or check-out directly with their Employee ID, functioning exactly like a physical biometric machine punch.
+
+### Running the Web Terminal:
+```bash
+cd ../attendance_web
+npm run dev
+```
+
+### Direct Bypass API Endpoint:
+You can also trigger punches programmatically:
+```bash
+POST /api/punch
+Content-Type: application/json
+
+{
+  "emp_code": "101",
+  "punch_state": "auto",       # "auto", "checkin", or "checkout"
+  "punch_datetime": "25/09/2026 09:30:00"  # (Optional, defaults to now)
+}
+```
+
+
