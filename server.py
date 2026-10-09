@@ -3,7 +3,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
 from urllib.parse import parse_qs, urlparse
@@ -62,6 +62,11 @@ PROCESSED_FILE = "processed_punches.json"
 
 # Cutoff date: only sync punches on or after this timestamp
 SYNC_FROM_DATE_ENV = os.getenv("SYNC_FROM_DATE", "today").strip().lower()
+
+# Machine punch auto-checkout cutoff time (e.g. "16:30")
+# Any machine check-in between this time and 23:59 will be recorded as check-out
+MACHINE_CHECKOUT_AFTER_TIME = os.getenv("MACHINE_CHECKOUT_AFTER_TIME", "16:30").strip()
+
 
 
 def get_sync_cutoff():
@@ -331,6 +336,20 @@ def send_to_zoho(record, is_bypass=False):
             emp_daily_punches[date_key] = punch_dt
     else:
         emp_daily_punches[date_key] = punch_dt
+
+    # --------------------------------------------------------
+    # Machine Punch Rule: Check-in after 16:30 -> Checkout
+    # (Only applies to machine/biometric punches, NOT manual/bypass)
+    # --------------------------------------------------------
+    if not is_bypass and state_normalized == "checkin":
+        try:
+            cutoff_h, cutoff_m = map(int, MACHINE_CHECKOUT_AFTER_TIME.split(":"))
+        except Exception:
+            cutoff_h, cutoff_m = 16, 30
+
+        if punch_dt.time() >= dt_time(cutoff_h, cutoff_m, 0):
+            log(f"RULE APPLIED: Machine check-in for {emp_code} at {zoho_datetime} converted to CHECKOUT (Punch time is on/after {MACHINE_CHECKOUT_AFTER_TIME})")
+            state_normalized = "checkout"
 
     # --------------------------------------------------------
     # Duplicate key
@@ -794,6 +813,7 @@ def run_server():
     log(f" Server: http://{HOST}:{PORT}")
     log(f" Zoho DC: {ZOHO_PEOPLE_URL}")
     log(f" Sync Cutoff: {SYNC_CUTOFF.strftime('%Y-%m-%d %H:%M:%S')} (punches before this are skipped)")
+    log(f" Machine Check-in Rule: Convert to Checkout after {MACHINE_CHECKOUT_AFTER_TIME} - 23:59")
     log(f" Log file: {LOG_FILE}")
     log(" Mode: Dual (EasyTimePro Webhook + ZKTeco Direct ADMS) + Web Punch API")
     log("==========================================")
